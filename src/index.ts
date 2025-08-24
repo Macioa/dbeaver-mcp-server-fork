@@ -1,23 +1,15 @@
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListResourcesRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-  ReadResourceRequestSchema,
-  Tool,
-} from '@modelcontextprotocol/sdk/types.js';
 import { DBeaverConfigParser } from './config-parser.js';
 import { DBeaverClient } from './dbeaver-client.js';
 import { DBeaverConnection, QueryResult, ExportOptions, BusinessInsight, TableResource } from './types.js';
+import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, Tool, McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { validateQuery, sanitizeConnectionId, formatError, convertToCSV } from './utils.js';
 // CSV functionality will be handled in utils
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import { spawn } from 'child_process';
 
 class DBeaverMCPServer {
   private server: Server;
@@ -196,29 +188,30 @@ class DBeaverMCPServer {
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
       try {
         const connections = await this.configParser.parseConnections();
-        const resources: any[] = [];
-
+        const allResources: any[] = [];
+        
         for (const connection of connections) {
+          const resources: any[] = [];
+          
           try {
-            const tables = await this.dbeaverClient.listTables(connection, undefined, false);
+            const tables = await this.dbeaverClient.listTables(connection);
             
             for (const table of tables) {
-              const tableName = typeof table === 'string' ? table : table.name || table.table_name;
-              if (tableName) {
-                resources.push({
-                  uri: `dbeaver://${connection.id}/${tableName}/schema`,
-                  mimeType: "application/json",
-                  name: `"${tableName}" schema (${connection.name})`,
-                  description: `Schema information for table ${tableName} in ${connection.name}`,
-                });
-              }
+              resources.push({
+                connectionId: connection.id,
+                tableName: table.name || table.table_name,
+                schema: table.schema || table.table_schema,
+                uri: `table://${connection.id}/${table.schema || table.table_schema}/${table.name || table.table_name}`
+              });
             }
           } catch (error) {
-            this.log(`Failed to list tables for connection ${connection.name}: ${error}`, 'debug');
+            this.log(`Failed to get tables for connection ${connection.id}: ${error}`, 'debug');
           }
+          
+          allResources.push(...resources);
         }
 
-        return { resources };
+        return { resources: allResources };
       } catch (error) {
         this.log(`Failed to list resources: ${error}`, 'error');
         return { resources: [] };
@@ -580,6 +573,28 @@ class DBeaverMCPServer {
             required: [],
           },
         },
+        {
+          name: 'set_db_password',
+          description: 'Set a database password in the .env file with an appropriately named environment variable',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              connectionId: {
+                type: 'string',
+                description: 'The ID or name of the DBeaver connection to set password for'
+              },
+              password: {
+                type: 'string',
+                description: 'The database password to set'
+              },
+              customVarName: {
+                type: 'string',
+                description: 'Custom environment variable name (optional, will auto-generate if not provided)'
+              }
+            },
+            required: ['connectionId', 'password']
+          }
+        },
       ];
 
       return { tools };
@@ -680,6 +695,13 @@ class DBeaverMCPServer {
             
           case 'list_db_passwords':
             return await this.handleListDbPasswords();
+            
+          case 'set_db_password':
+            return await this.handleSetDbPassword(args as {
+              connectionId: string;
+              password: string;
+              customVarName?: string;
+            });
             
           default:
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
@@ -969,7 +991,7 @@ class DBeaverMCPServer {
 
     try {
       // Use the enhanced exportData method from DBeaverClient
-      const exportOptions = {
+      const exportOptions: ExportOptions = {
         format: args.format as 'csv' | 'json' | 'xml' | 'excel',
         includeHeaders: args.includeHeaders,
         maxRows: args.maxRows
@@ -1121,6 +1143,62 @@ class DBeaverMCPServer {
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }],
     };
+  }
+
+  private async handleSetDbPassword(args: {
+    connectionId: string;
+    password: string;
+    customVarName?: string;
+  }) {
+    const connectionId = sanitizeConnectionId(args.connectionId);
+    const password = args.password;
+    const customVarName = args.customVarName || `DB_PASSWORD_${connectionId.toUpperCase().replace(/-/g, '_')}`;
+
+    if (!password) {
+      throw new McpError(ErrorCode.InvalidParams, 'Password cannot be empty');
+    }
+
+    const connection = await this.configParser.getConnection(connectionId);
+    if (!connection) {
+      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
+    }
+
+    try {
+      // Attempt to set the password in the .env file
+      const envFilePath = path.join(os.homedir(), '.env');
+      let envContent = '';
+      if (fs.existsSync(envFilePath)) {
+        envContent = fs.readFileSync(envFilePath, 'utf-8');
+      }
+
+      const newEnvContent = envContent.replace(
+        new RegExp(`^${customVarName}=.*$`, 'm'),
+        `${customVarName}=${password}`
+      );
+
+      if (newEnvContent !== envContent) {
+        fs.writeFileSync(envFilePath, newEnvContent);
+        this.log(`Password set for ${customVarName} in ${envFilePath}`);
+      } else {
+        this.log(`Password for ${customVarName} already exists in ${envFilePath}`);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            message: `Password set for ${customVarName} in ${envFilePath}`,
+            connection: connection.name,
+            varName: customVarName,
+            password: password
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      this.log(`Failed to set DB password: ${error}`, 'error');
+      throw new McpError(ErrorCode.InternalError, `Failed to set DB password: ${formatError(error)}`);
+    }
   }
 
   async run() {
