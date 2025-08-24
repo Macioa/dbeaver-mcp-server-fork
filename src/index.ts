@@ -686,7 +686,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
     
     const response = {
       query: query,
@@ -717,7 +717,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
     
     return {
       content: [{
@@ -744,7 +744,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
     
     return {
       content: [{
@@ -791,7 +791,7 @@ class DBeaverMCPServer {
     }
     
     const dropQuery = `DROP TABLE "${tableName}"`;
-    const result = await this.dbeaverClient.executeQuery(connection, dropQuery);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, dropQuery);
     
     return {
       content: [{

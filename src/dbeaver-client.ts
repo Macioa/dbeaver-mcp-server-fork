@@ -34,6 +34,23 @@ export class DBeaverClient {
     }
   }
 
+  async executeWriteQuery(connection: DBeaverConnection, query: string): Promise<QueryResult> {
+    const startTime = Date.now();
+    
+    try {
+      // Build psql command with connection details
+      const psqlArgs = this.buildPsqlArgs(connection, query);
+      
+      // Execute psql command
+      const result = await this.executePsqlWrite(psqlArgs);
+      result.executionTime = Date.now() - startTime;
+
+      return result;
+    } catch (error) {
+      throw new Error(`Write query execution failed: ${error}`);
+    }
+  }
+
   private buildPsqlArgs(connection: DBeaverConnection, query: string): string[] {
     const args: string[] = [];
     
@@ -108,6 +125,51 @@ export class DBeaverClient {
     });
   }
 
+  private async executePsqlWrite(args: string[]): Promise<QueryResult> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Write query execution timed out'));
+      }, this.timeout);
+
+      const proc = spawn('psql', args, { 
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, PGPASSWORD: process.env.PGPASSWORD || '' }
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        clearTimeout(timeout);
+        
+        if (code !== 0) {
+          reject(new Error(`psql failed with code ${code}: ${stderr}`));
+          return;
+        }
+
+        try {
+          const result = this.parsePsqlWriteOutput(stdout);
+          resolve(result);
+        } catch (error) {
+          reject(new Error(`Failed to parse psql write output: ${error}`));
+        }
+      });
+
+      proc.on('error', (error) => {
+        clearTimeout(timeout);
+        reject(new Error(`Failed to execute psql: ${error.message}`));
+      });
+    });
+  }
+
   private parsePsqlOutput(output: string): QueryResult {
     const lines = output.trim().split('\n');
     
@@ -138,6 +200,33 @@ export class DBeaverClient {
       rows,
       rowCount: rows.length,
       executionTime: 0
+    };
+  }
+
+  private parsePsqlWriteOutput(output: string): QueryResult {
+    const lines = output.trim().split('\n');
+    let rowCount = 0;
+    let executionTime = 0;
+
+    for (const line of lines) {
+      if (line.includes('Time:')) {
+        const timeMatch = line.match(/Time: (\d+) ms/);
+        if (timeMatch) {
+          executionTime = parseInt(timeMatch[1]);
+        }
+      } else if (line.includes('Rows affected:')) {
+        const rowsMatch = line.match(/Rows affected: (\d+)/);
+        if (rowsMatch) {
+          rowCount = parseInt(rowsMatch[1]);
+        }
+      }
+    }
+
+    return {
+      columns: [], // No columns for write queries
+      rows: [],
+      rowCount: rowCount,
+      executionTime: executionTime
     };
   }
 

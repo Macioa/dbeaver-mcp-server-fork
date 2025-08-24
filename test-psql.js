@@ -29,13 +29,18 @@ async function testPsql() {
     const result = await client.executeQuery(testConnection, 'SELECT version();');
     console.log('Query result:', JSON.stringify(result, null, 2));
     
+    // Test write query (INSERT)
+    console.log('\nTesting write query (INSERT)...');
+    const writeResult = await client.executeWriteQuery(testConnection, 'CREATE TABLE IF NOT EXISTS test_table (id SERIAL PRIMARY KEY, name TEXT);');
+    console.log('Write query result:', JSON.stringify(writeResult, null, 2));
+    
     // Test table listing
     const tables = await client.listTables(testConnection);
-    console.log('Tables:', JSON.stringify(tables, null, 2));
+    console.log('\nTables:', JSON.stringify(tables, null, 2));
     
     // Test database stats
     const stats = await client.getDatabaseStats(testConnection);
-    console.log('Database stats:', JSON.stringify(stats, null, 2));
+    console.log('\nDatabase stats:', JSON.stringify(stats, null, 2));
     
   } catch (error) {
     console.error('Test failed:', error.message);
