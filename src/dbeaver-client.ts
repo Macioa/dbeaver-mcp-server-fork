@@ -267,7 +267,8 @@ export class DBeaverClient {
           CASE WHEN col.column_default LIKE 'nextval%' THEN true ELSE false END as is_auto_increment,
           character_maximum_length,
           numeric_precision,
-          numeric_scale
+          numeric_scale,
+          ordinal_position
         FROM information_schema.columns col
         LEFT JOIN (
           SELECT kcu.column_name
@@ -282,7 +283,7 @@ export class DBeaverClient {
       const result = await this.executeQuery(connection, schemaQuery);
       
       // Parse the schema result
-      const columns = result.rows.map(row => ({
+      const columns = result.rows.map((row: any[]) => ({
         name: row[0],
         type: row[1],
         nullable: row[2] === 'YES',
@@ -291,50 +292,106 @@ export class DBeaverClient {
         isAutoIncrement: row[5] === true,
         length: row[6] ? parseInt(row[6]) : undefined,
         precision: row[7] ? parseInt(row[7]) : undefined,
-        scale: row[8] ? parseInt(row[8]) : undefined
+        scale: row[8] ? parseInt(row[8]) : undefined,
+        position: parseInt(row[9]) || 0
       }));
 
-      // Get index information
+      // Get index information with more details
       const indexQuery = `
         SELECT 
-          indexname,
-          indexdef
-        FROM pg_indexes 
-        WHERE tablename = '${tableName}';
+          i.relname as index_name,
+          array_to_string(array_agg(a.attname), ', ') as column_names,
+          ix.indisunique as is_unique,
+          ix.indisprimary as is_primary,
+          am.amname as index_type,
+          pg_get_indexdef(ix.indexrelid) as index_definition
+        FROM pg_class t
+        JOIN pg_index ix ON t.oid = ix.indrelid
+        JOIN pg_class i ON ix.indexrelid = i.oid
+        JOIN pg_am am ON i.relam = am.oid
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+        WHERE t.relname = '${tableName}'
+        GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indexrelid
+        ORDER BY i.relname;
       `;
       
       const indexResult = await this.executeQuery(connection, indexQuery);
-      const indexes = indexResult.rows.map(row => ({
+      const indexes = indexResult.rows.map((row: any[]) => ({
         name: row[0],
-        columns: this.extractIndexColumns(row[1]),
-        unique: row[1].includes('UNIQUE'),
-        type: 'btree' // Default PostgreSQL index type
+        columns: row[1].split(', ').filter((col: string) => col.length > 0),
+        unique: row[2] === true,
+        isPrimary: row[3] === true,
+        type: row[4] || 'btree',
+        definition: row[5]
       }));
 
-      // Get constraint information
+      // Get constraint information with more details
       const constraintQuery = `
         SELECT 
-          conname,
-          contype,
-          pg_get_constraintdef(oid) as definition
+          conname as constraint_name,
+          contype as constraint_type,
+          pg_get_constraintdef(oid) as definition,
+          CASE 
+            WHEN contype = 'f' THEN (
+              SELECT relname FROM pg_class WHERE oid = confrelid
+            )
+            ELSE NULL
+          END as referenced_table,
+          CASE 
+            WHEN contype = 'f' THEN (
+              SELECT array_to_string(array_agg(attname), ', ')
+              FROM pg_attribute 
+              WHERE attrelid = confrelid AND attnum = ANY(confkey)
+            )
+            ELSE NULL
+          END as referenced_columns
         FROM pg_constraint 
-        WHERE conrelid = '${tableName}'::regclass;
+        WHERE conrelid = '${tableName}'::regclass
+        ORDER BY conname;
       `;
       
       const constraintResult = await this.executeQuery(connection, constraintQuery);
-      const constraints = constraintResult.rows.map(row => ({
+      const constraints = constraintResult.rows.map((row: any[]) => ({
         name: row[0],
         type: this.mapConstraintType(row[1]),
+        definition: row[2],
         columns: this.extractConstraintColumns(row[2]),
-        referencedTable: undefined, // Would need additional parsing for FK constraints
-        referencedColumns: undefined
+        referencedTable: row[3] || undefined,
+        referencedColumns: row[4] ? row[4].split(', ') : undefined
       }));
+
+      // Get table statistics
+      const statsQuery = `
+        SELECT 
+          pg_size_pretty(pg_total_relation_size('${tableName}'::regclass)) as total_size,
+          pg_size_pretty(pg_relation_size('${tableName}'::regclass)) as table_size,
+          pg_size_pretty(pg_total_relation_size('${tableName}'::regclass) - pg_relation_size('${tableName}'::regclass)) as index_size,
+          (SELECT count(*) FROM ${tableName}) as row_count
+      `;
+      
+      let tableStats: any = undefined;
+      try {
+        const statsResult = await this.executeQuery(connection, statsQuery);
+        if (statsResult.rows.length > 0) {
+          const stats = statsResult.rows[0];
+          tableStats = {
+            totalSize: stats[0],
+            tableSize: stats[1],
+            indexSize: stats[2],
+            rowCount: parseInt(stats[3]) || 0
+          };
+        }
+      } catch (error) {
+        // Stats query might fail for some tables, ignore
+        tableStats = undefined;
+      }
 
       return {
         tableName,
         columns,
         indexes,
-        constraints
+        constraints,
+        statistics: tableStats
       };
     } catch (error) {
       throw new Error(`Failed to get table schema: ${error}`);

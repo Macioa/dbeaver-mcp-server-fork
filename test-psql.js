@@ -38,6 +38,15 @@ async function testPsql() {
     const tables = await client.listTables(testConnection);
     console.log('\nTables:', JSON.stringify(tables, null, 2));
     
+    // Test enhanced table schema
+    console.log('\nTesting enhanced table schema...');
+    try {
+      const schema = await client.getTableSchema(testConnection, 'test_table');
+      console.log('Table schema:', JSON.stringify(schema, null, 2));
+    } catch (error) {
+      console.log('Schema test failed (table might not exist):', error.message);
+    }
+    
     // Test database stats
     const stats = await client.getDatabaseStats(testConnection);
     console.log('\nDatabase stats:', JSON.stringify(stats, null, 2));

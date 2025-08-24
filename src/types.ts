@@ -27,6 +27,14 @@ export interface DBeaverConnection {
     columns: ColumnInfo[];
     indexes: IndexInfo[];
     constraints: ConstraintInfo[];
+    statistics?: TableStatistics;
+  }
+
+  export interface TableStatistics {
+    totalSize: string;
+    tableSize: string;
+    indexSize: string;
+    rowCount: number;
   }
   
   export interface ColumnInfo {
