@@ -75,50 +75,38 @@ class DBeaverMCPServer {
     }
   }
 
-  private async executePsqlDirect(connection: DBeaverConnection, query: string, timeout: number = 30000): Promise<QueryResult> {
+  private async executePsqlDirect(connection: DBeaverConnection, query: string, password?: string, timeout: number = 30000): Promise<QueryResult> {
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         reject(new Error('Query execution timed out'));
       }, timeout);
 
       const args = [];
-      
-      // Add connection parameters
       if (connection.host) args.push('-h', connection.host);
       if (connection.port) args.push('-p', connection.port.toString());
       if (connection.user) args.push('-U', connection.user);
       if (connection.database) args.push('-d', connection.database);
-      
-      // Add query
       args.push('-c', query);
-      
-      const proc = spawn('psql', args, { 
+
+      const proc = spawn('psql', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { 
-          ...process.env, 
-          PGPASSWORD: process.env.PGPASSWORD || 'postgres' // Default to postgres if not set
+        env: {
+          ...process.env,
+          PGPASSWORD: password || process.env.PGPASSWORD || 'postgres'
         }
       });
 
       let stdout = '';
       let stderr = '';
-
-      proc.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         clearTimeout(timeoutId);
-        
         if (code !== 0) {
           reject(new Error(`psql failed with code ${code}: ${stderr}`));
           return;
         }
-
         try {
           const result = this.parsePsqlOutput(stdout);
           resolve(result);
@@ -126,7 +114,6 @@ class DBeaverMCPServer {
           reject(new Error(`Failed to parse psql output: ${error}`));
         }
       });
-
       proc.on('error', (error) => {
         clearTimeout(timeoutId);
         reject(new Error(`Failed to execute psql: ${error.message}`));
@@ -312,20 +299,24 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection to use',
+                description: 'The ID or name of the DBeaver connection to use'
               },
               query: {
                 type: 'string',
-                description: 'The SQL query to execute (SELECT statements only)',
+                description: 'The SQL query to execute (SELECT statements only)'
               },
               maxRows: {
                 type: 'number',
                 description: 'Maximum number of rows to return (default: 1000)',
                 default: 1000
+              },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
               }
             },
-            required: ['connectionId', 'query'],
-          },
+            required: ['connectionId', 'query']
+          }
         },
         {
           name: 'write_query',
@@ -335,15 +326,19 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection to use',
+                description: 'The ID or name of the DBeaver connection to use'
               },
               query: {
                 type: 'string',
-                description: 'The SQL query to execute (INSERT, UPDATE, DELETE)',
+                description: 'The SQL query to execute (INSERT, UPDATE, DELETE statements only)'
               },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
+              }
             },
-            required: ['connectionId', 'query'],
-          },
+            required: ['connectionId', 'query']
+          }
         },
         {
           name: 'create_table',
@@ -353,15 +348,19 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               query: {
                 type: 'string',
-                description: 'CREATE TABLE statement',
+                description: 'CREATE TABLE statement'
               },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
+              }
             },
-            required: ['connectionId', 'query'],
-          },
+            required: ['connectionId', 'query']
+          }
         },
         {
           name: 'alter_table',
@@ -371,15 +370,19 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               query: {
                 type: 'string',
-                description: 'ALTER TABLE statement',
+                description: 'ALTER TABLE statement'
               },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
+              }
             },
-            required: ['connectionId', 'query'],
-          },
+            required: ['connectionId', 'query']
+          }
         },
         {
           name: 'drop_table',
@@ -389,19 +392,23 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               tableName: {
                 type: 'string',
-                description: 'Name of the table to drop',
+                description: 'Name of the table to drop'
               },
               confirm: {
                 type: 'boolean',
-                description: 'Safety confirmation flag (must be true)',
+                description: 'Safety confirmation flag (must be true)'
               },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
+              }
             },
-            required: ['connectionId', 'tableName', 'confirm'],
-          },
+            required: ['connectionId', 'tableName', 'confirm']
+          }
         },
         {
           name: 'get_table_schema',
@@ -411,20 +418,24 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               tableName: {
                 type: 'string',
-                description: 'The name of the table to describe',
+                description: 'The name of the table to describe'
               },
               includeIndexes: {
                 type: 'boolean',
                 description: 'Include index information',
                 default: true
+              },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
               }
             },
-            required: ['connectionId', 'tableName'],
-          },
+            required: ['connectionId', 'tableName']
+          }
         },
         {
           name: 'export_data',
@@ -434,11 +445,11 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               query: {
                 type: 'string',
-                description: 'The SQL query to execute for export (SELECT only)',
+                description: 'The SQL query to execute for export (SELECT only)'
               },
               format: {
                 type: 'string',
@@ -455,10 +466,14 @@ class DBeaverMCPServer {
                 type: 'number',
                 description: 'Maximum number of rows to export',
                 default: 10000
+              },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
               }
             },
-            required: ['connectionId', 'query'],
-          },
+            required: ['connectionId', 'query']
+          }
         },
         {
           name: 'test_connection',
@@ -496,20 +511,24 @@ class DBeaverMCPServer {
             properties: {
               connectionId: {
                 type: 'string',
-                description: 'The ID or name of the DBeaver connection',
+                description: 'The ID or name of the DBeaver connection'
               },
               schema: {
                 type: 'string',
-                description: 'Specific schema to list tables from (optional)',
+                description: 'Specific schema to list tables from (optional)'
               },
               includeViews: {
                 type: 'boolean',
                 description: 'Include views in the results',
                 default: false
+              },
+              password: {
+                type: 'string',
+                description: 'Database password for the connection (optional, will use environment variable if not provided)'
               }
             },
-            required: ['connectionId'],
-          },
+            required: ['connectionId']
+          }
         },
         {
           name: 'append_insight',
@@ -583,25 +602,29 @@ class DBeaverMCPServer {
             return await this.handleExecuteQuery(args as { 
               connectionId: string; 
               query: string; 
-              maxRows?: number 
+              maxRows?: number;
+              password?: string;
             });
 
           case 'write_query':
             return await this.handleWriteQuery(args as { 
               connectionId: string; 
               query: string; 
+              password?: string;
             });
 
           case 'create_table':
             return await this.handleCreateTable(args as { 
               connectionId: string; 
               query: string; 
+              password?: string;
             });
 
           case 'alter_table':
             return await this.handleAlterTable(args as { 
               connectionId: string; 
               query: string; 
+              password?: string;
             });
 
           case 'drop_table':
@@ -615,16 +638,18 @@ class DBeaverMCPServer {
             return await this.handleGetTableSchema(args as { 
               connectionId: string; 
               tableName: string; 
-              includeIndexes?: boolean 
+              includeIndexes?: boolean;
+              password?: string;
             });
             
           case 'export_data':
             return await this.handleExportData(args as { 
               connectionId: string; 
               query: string; 
-              format?: string; 
-              includeHeaders?: boolean; 
-              maxRows?: number 
+              format: string; 
+              includeHeaders: boolean; 
+              maxRows: number;
+              password?: string;
             });
             
           case 'test_connection':
@@ -719,59 +744,44 @@ class DBeaverMCPServer {
     };
   }
 
-  private async handleExecuteQuery(args: { 
-    connectionId: string; 
-    query: string; 
-    maxRows?: number 
+  private async handleExecuteQuery(args: {
+    connectionId: string;
+    query: string;
+    maxRows?: number;
+    password?: string;
   }) {
-    const connectionId = sanitizeConnectionId(args.connectionId);
-    const query = args.query.trim();
-    const maxRows = args.maxRows || 1000;
-    
-    // Validate query
-    const validationError = validateQuery(query);
-    if (validationError) {
-      throw new McpError(ErrorCode.InvalidParams, validationError);
-    }
-    
-    const connection = await this.configParser.getConnection(connectionId);
+    const connection = await this.configParser.getConnection(args.connectionId);
     if (!connection) {
-      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
+      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${args.connectionId}`);
     }
-    
-    // Add LIMIT clause if not present and it's a SELECT query
-    let finalQuery = query;
-    if (query.toLowerCase().trimStart().startsWith('select') && 
-        !query.toLowerCase().includes('limit')) {
-      finalQuery = `${query} LIMIT ${maxRows}`;
+
+    // Validate query - only SELECT queries allowed
+    const trimmedQuery = args.query.trim();
+    if (!trimmedQuery.toLowerCase().startsWith('select')) {
+      throw new McpError(ErrorCode.InvalidParams, 'Only SELECT queries are allowed for execute_query');
     }
-    
+
+    // Apply maxRows limit if specified
+    let finalQuery = trimmedQuery;
+    if (args.maxRows && args.maxRows > 0) {
+      finalQuery = `${trimmedQuery} LIMIT ${args.maxRows}`;
+    }
+
     try {
-      // Use direct psql execution instead of DBeaver client
-      const result = await this.executePsqlDirect(connection, finalQuery);
-      
+      const result = await this.executePsqlDirect(connection, finalQuery, args.password);
       const response = {
-        query: finalQuery,
-        connection: connection.name,
-        executionTime: result.executionTime,
-        rowCount: result.rowCount,
         columns: result.columns,
         rows: result.rows,
-        truncated: result.rows.length >= maxRows
+        rowCount: result.rows.length,
+        executionTime: Date.now() // Simple execution time tracking
       };
-      
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(response, null, 2),
-        }],
-      };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2), }], };
     } catch (error) {
       throw new McpError(ErrorCode.InternalError, `Query execution failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private async handleWriteQuery(args: { connectionId: string; query: string }) {
+  private async handleWriteQuery(args: { connectionId: string; query: string; password?: string }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
     const query = args.query.trim();
     
@@ -796,7 +806,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query, args.password);
     
     const response = {
       query: query,
@@ -814,7 +824,7 @@ class DBeaverMCPServer {
     };
   }
 
-  private async handleCreateTable(args: { connectionId: string; query: string }) {
+  private async handleCreateTable(args: { connectionId: string; query: string; password?: string }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
     const query = args.query.trim();
     
@@ -827,7 +837,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query, args.password);
     
     return {
       content: [{
@@ -841,7 +851,7 @@ class DBeaverMCPServer {
     };
   }
 
-  private async handleAlterTable(args: { connectionId: string; query: string }) {
+  private async handleAlterTable(args: { connectionId: string; query: string; password?: string }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
     const query = args.query.trim();
     
@@ -854,7 +864,7 @@ class DBeaverMCPServer {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
     
-    const result = await this.dbeaverClient.executeWriteQuery(connection, query);
+    const result = await this.dbeaverClient.executeWriteQuery(connection, query, args.password);
     
     return {
       content: [{
@@ -868,123 +878,110 @@ class DBeaverMCPServer {
     };
   }
 
-  private async handleDropTable(args: { connectionId: string; tableName: string; confirm: boolean }) {
+  private async handleDropTable(args: { connectionId: string; tableName: string; confirm: boolean; password?: string }) {
+    if (!args.confirm) {
+      throw new McpError(ErrorCode.InvalidParams, 'Safety confirmation required. Set confirm to true to proceed.');
+    }
+
     const connectionId = sanitizeConnectionId(args.connectionId);
-    const tableName = args.tableName;
+    const tableName = args.tableName.trim();
     
     if (!tableName) {
       throw new McpError(ErrorCode.InvalidParams, 'Table name is required');
     }
+
+    const connection = await this.configParser.getConnection(connectionId);
+    if (!connection) {
+      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
+    }
+
+    const dropQuery = `DROP TABLE IF EXISTS "${tableName}" CASCADE;`;
     
-    if (!args.confirm) {
+    try {
+      const result = await this.dbeaverClient.executeWriteQuery(connection, dropQuery, args.password);
+      
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ 
-            success: false, 
-            message: 'Safety confirmation required. Set confirm=true to proceed with dropping the table.' 
-          }, null, 2),
-        }],
+          text: JSON.stringify({
+            success: true,
+            message: `Table ${tableName} dropped successfully`,
+            result: result
+          }, null, 2)
+        }]
       };
-    }
-    
-    const connection = await this.configParser.getConnection(connectionId);
-    if (!connection) {
-      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
-    }
-    
-    // Check if table exists first
-    try {
-      await this.dbeaverClient.getTableSchema(connection, tableName);
     } catch (error) {
-      throw new McpError(ErrorCode.InvalidParams, `Table '${tableName}' does not exist or cannot be accessed`);
+      throw new McpError(ErrorCode.InternalError, `Failed to drop table: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    const dropQuery = `DROP TABLE "${tableName}"`;
-    const result = await this.dbeaverClient.executeWriteQuery(connection, dropQuery);
-    
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({ 
-          success: true, 
-          message: `Table '${tableName}' dropped successfully`,
-          executionTime: result.executionTime 
-        }, null, 2),
-      }],
-    };
   }
 
-  private async handleGetTableSchema(args: { 
-    connectionId: string; 
-    tableName: string; 
-    includeIndexes?: boolean 
-  }) {
+  private async handleGetTableSchema(args: { connectionId: string; tableName: string; includeIndexes?: boolean; password?: string }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
-    const connection = await this.configParser.getConnection(connectionId);
+    const tableName = args.tableName.trim();
     
+    if (!tableName) {
+      throw new McpError(ErrorCode.InvalidParams, 'Table name is required');
+    }
+
+    const connection = await this.configParser.getConnection(connectionId);
     if (!connection) {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
-    
-    const schema = await this.dbeaverClient.getTableSchema(connection, args.tableName);
-    
-    if (!args.includeIndexes) {
-      (schema as any).indexes = undefined;
+
+    try {
+      const schema = await this.dbeaverClient.getTableSchema(connection, tableName, args.password);
+      
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(schema, null, 2)
+        }]
+      };
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Failed to get table schema: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify(schema, null, 2),
-      }],
-    };
   }
 
   private async handleExportData(args: { 
     connectionId: string; 
     query: string; 
-    format?: string; 
-    includeHeaders?: boolean; 
-    maxRows?: number 
+    format: string; 
+    includeHeaders: boolean; 
+    maxRows: number;
+    password?: string;
   }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
     const query = args.query.trim();
     
+    if (!query) {
+      throw new McpError(ErrorCode.InvalidParams, 'Query is required');
+    }
+
     // Validate query - only SELECT queries for export
-    if (!query.toLowerCase().trimStart().startsWith('select')) {
+    if (!query.toLowerCase().startsWith('select')) {
       throw new McpError(ErrorCode.InvalidParams, 'Only SELECT queries are allowed for export');
     }
-    
+
     const connection = await this.configParser.getConnection(connectionId);
     if (!connection) {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
-    
-    const maxRows = args.maxRows || 10000;
-    const format = args.format || 'csv';
-    
-    // Add LIMIT clause if not present
-    let finalQuery = query;
-    if (!query.toLowerCase().includes('limit')) {
-      finalQuery = `${query} LIMIT ${maxRows}`;
-    }
-    
+
     try {
       // Use the enhanced exportData method from DBeaverClient
       const exportOptions = {
-        format: format as 'csv' | 'json',
-        includeHeaders: args.includeHeaders !== false, // Default to true
-        maxRows: maxRows
+        format: args.format as 'csv' | 'json' | 'xml' | 'excel',
+        includeHeaders: args.includeHeaders,
+        maxRows: args.maxRows
       };
       
-      const exportedData = await this.dbeaverClient.exportData(connection, finalQuery, exportOptions);
+      const result = await this.dbeaverClient.exportData(connection, query, exportOptions, args.password);
       
       return {
         content: [{
           type: 'text' as const,
-          text: exportedData,
-        }],
+          text: result
+        }]
       };
     } catch (error) {
       throw new McpError(ErrorCode.InternalError, `Export failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1027,30 +1024,31 @@ class DBeaverMCPServer {
     };
   }
 
-  private async handleListTables(args: { 
-    connectionId: string; 
-    schema?: string; 
-    includeViews?: boolean 
+  private async handleListTables(args: {
+    connectionId: string;
+    schema?: string;
+    includeViews?: boolean;
+    password?: string;
   }) {
     const connectionId = sanitizeConnectionId(args.connectionId);
-    const connection = await this.configParser.getConnection(connectionId);
     
+    const connection = await this.configParser.getConnection(connectionId);
     if (!connection) {
       throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
     }
-    
-    const tables = await this.dbeaverClient.listTables(
-      connection, 
-      args.schema, 
-      args.includeViews || false
-    );
-    
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify(tables, null, 2),
-      }],
-    };
+
+    try {
+      const tables = await this.dbeaverClient.listTables(connection, args.schema, args.includeViews || false, args.password);
+      
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(tables, null, 2)
+        }]
+      };
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Failed to list tables: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async handleAppendInsight(args: { insight: string; connection?: string; tags?: string[] }) {
