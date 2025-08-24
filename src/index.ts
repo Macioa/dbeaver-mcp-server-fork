@@ -17,6 +17,7 @@ import { validateQuery, sanitizeConnectionId, formatError, convertToCSV } from '
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawn } from 'child_process';
 
 class DBeaverMCPServer {
   private server: Server;
@@ -72,6 +73,98 @@ class DBeaverMCPServer {
     } else {
       console.error(`${prefix} ${message}`);
     }
+  }
+
+  private async executePsqlDirect(connection: DBeaverConnection, query: string, timeout: number = 30000): Promise<QueryResult> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error('Query execution timed out'));
+      }, timeout);
+
+      const args = [];
+      
+      // Add connection parameters
+      if (connection.host) args.push('-h', connection.host);
+      if (connection.port) args.push('-p', connection.port.toString());
+      if (connection.user) args.push('-U', connection.user);
+      if (connection.database) args.push('-d', connection.database);
+      
+      // Add query
+      args.push('-c', query);
+      
+      const proc = spawn('psql', args, { 
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { 
+          ...process.env, 
+          PGPASSWORD: process.env.PGPASSWORD || 'postgres' // Default to postgres if not set
+        }
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        clearTimeout(timeoutId);
+        
+        if (code !== 0) {
+          reject(new Error(`psql failed with code ${code}: ${stderr}`));
+          return;
+        }
+
+        try {
+          const result = this.parsePsqlOutput(stdout);
+          resolve(result);
+        } catch (error) {
+          reject(new Error(`Failed to parse psql output: ${error}`));
+        }
+      });
+
+      proc.on('error', (error) => {
+        clearTimeout(timeoutId);
+        reject(new Error(`Failed to execute psql: ${error.message}`));
+      });
+    });
+  }
+
+  private parsePsqlOutput(output: string): QueryResult {
+    const lines = output.trim().split('\n');
+    
+    if (lines.length === 0) {
+      return { columns: [], rows: [], rowCount: 0, executionTime: 0 };
+    }
+
+    // First line contains column headers
+    const headerLine = lines[0];
+    const columns = headerLine.split('|').map(col => col.trim()).filter(col => col.length > 0);
+    
+    // Parse data rows (skip header and separator lines)
+    const rows: any[][] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.length === 0 || line.match(/^[+-]+$/)) {
+        continue; // Skip empty lines and separator lines
+      }
+      
+      const values = line.split('|').map(val => val.trim());
+      if (values.length === columns.length) {
+        rows.push(values);
+      }
+    }
+
+    return {
+      columns,
+      rows,
+      rowCount: rows.length,
+      executionTime: 0
+    };
   }
 
   private loadInsights() {
@@ -459,6 +552,15 @@ class DBeaverMCPServer {
             },
           },
         },
+        {
+          name: 'list_db_passwords',
+          description: 'List all environment variables ending with db_password (case-insensitive)',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
       ];
 
       return { tools };
@@ -551,6 +653,9 @@ class DBeaverMCPServer {
               tags?: string[] 
             });
             
+          case 'list_db_passwords':
+            return await this.handleListDbPasswords();
+            
           default:
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
         }
@@ -641,24 +746,29 @@ class DBeaverMCPServer {
       finalQuery = `${query} LIMIT ${maxRows}`;
     }
     
-    const result = await this.dbeaverClient.executeQuery(connection, finalQuery);
-    
-    const response = {
-      query: finalQuery,
-      connection: connection.name,
-      executionTime: result.executionTime,
-      rowCount: result.rowCount,
-      columns: result.columns,
-      rows: result.rows,
-      truncated: result.rows.length >= maxRows
-    };
-    
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify(response, null, 2),
-      }],
-    };
+    try {
+      // Use direct psql execution instead of DBeaver client
+      const result = await this.executePsqlDirect(connection, finalQuery);
+      
+      const response = {
+        query: finalQuery,
+        connection: connection.name,
+        executionTime: result.executionTime,
+        rowCount: result.rowCount,
+        columns: result.columns,
+        rows: result.rows,
+        truncated: result.rows.length >= maxRows
+      };
+      
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(response, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Query execution failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async handleWriteQuery(args: { connectionId: string; query: string }) {
@@ -860,33 +970,24 @@ class DBeaverMCPServer {
       finalQuery = `${query} LIMIT ${maxRows}`;
     }
     
-    const result = await this.dbeaverClient.executeQuery(connection, finalQuery);
-    
-    if (format === 'csv') {
-      const csvData = convertToCSV(result.columns, result.rows);
-      return {
-        content: [{
-          type: 'text' as const,
-          text: csvData,
-        }],
+    try {
+      // Use the enhanced exportData method from DBeaverClient
+      const exportOptions = {
+        format: format as 'csv' | 'json',
+        includeHeaders: args.includeHeaders !== false, // Default to true
+        maxRows: maxRows
       };
-    } else if (format === 'json') {
-      const jsonData = result.rows.map(row => {
-        const obj: any = {};
-        result.columns.forEach((col, idx) => {
-          obj[col] = row[idx];
-        });
-        return obj;
-      });
+      
+      const exportedData = await this.dbeaverClient.exportData(connection, finalQuery, exportOptions);
       
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(jsonData, null, 2),
+          text: exportedData,
         }],
       };
-    } else {
-      throw new McpError(ErrorCode.InvalidParams, `Unsupported export format: ${format}. Use 'csv' or 'json'`);
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Export failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1000,6 +1101,27 @@ class DBeaverMCPServer {
         type: 'text' as const,
         text: JSON.stringify(filteredInsights, null, 2),
       }],
+    };
+  }
+
+  private async handleListDbPasswords() {
+    const dbPasswordVars: { [key: string]: string } = {};
+    
+    // Collect all environment variables ending with 'db_password' (case-insensitive)
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key.toLowerCase().endsWith('db_password')) {
+        dbPasswordVars[key] = value || '';
+      }
+    }
+    
+    const response = {
+      dbPasswords: dbPasswordVars,
+      count: Object.keys(dbPasswordVars).length,
+      message: `Found ${Object.keys(dbPasswordVars).length} database password environment variables`
+    };
+    
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }],
     };
   }
 
