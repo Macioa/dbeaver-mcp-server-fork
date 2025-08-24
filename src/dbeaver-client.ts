@@ -222,24 +222,28 @@ export class DBeaverClient {
 
   async testConnection(connection: DBeaverConnection, password?: string): Promise<ConnectionTest> {
     const startTime = Date.now();
-
+    
     try {
-      // Simple test query to check connectivity
-      const testQuery = 'SELECT version();';
-      const result = await this.executeQuery(connection, testQuery, password);
-
+      // Test connection by executing a simple query
+      const result = await this.executeQuery(connection, 'SELECT version();', password);
+      
+      const responseTime = Date.now() - startTime;
+      const databaseVersion = this.extractVersionFromResult(result);
+      
       return {
         connectionId: connection.id,
         success: true,
-        responseTime: Date.now() - startTime,
-        databaseVersion: this.extractVersionFromResult(result)
+        responseTime,
+        databaseVersion
       };
     } catch (error) {
+      const responseTime = Date.now() - startTime;
+      
       return {
         connectionId: connection.id,
         success: false,
         error: error instanceof Error ? error.message : String(error),
-        responseTime: Date.now() - startTime
+        responseTime
       };
     }
   }
