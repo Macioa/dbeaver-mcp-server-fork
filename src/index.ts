@@ -873,7 +873,7 @@ class DBeaverMCPServer {
         },
         {
           name: 'list_db_passwords',
-          description: '⚠️ CRITICAL PASSWORD STEP: List all environment variables ending with db_password and db_username (case-insensitive). MUST be called together with get_connection_info to verify both connection details AND password/username configuration. This prevents hanging connections due to missing passwords.',
+          description: '⚠️ CRITICAL PASSWORD STEP: List all environment variables ending with db_password and db_username (case-insensitive). MUST be called together with get_connection_info to verify both connection details AND password/username configuration. If no login match is found between the connection list and password list, prompt the user to update their .env file or manually provide username and password and wait for user input.',
           inputSchema: {
             type: 'object',
             properties: {},
