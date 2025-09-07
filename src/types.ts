@@ -15,12 +15,13 @@ export interface DBeaverConnection {
   }
   
   export interface QueryResult {
-    columns: string[];
-    rows: any[][];
-    rowCount: number;
-    executionTime: number;
-    error?: string;
-  }
+  columns: string[];
+  rows: any[][];
+  rowCount: number;
+  executionTime: number;
+  error?: string;
+  exitCode?: number;
+}
   
   export interface SchemaInfo {
     tableName: string;

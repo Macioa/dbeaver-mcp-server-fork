@@ -5,7 +5,11 @@ import {
   SchemaInfo,
   ExportOptions,
   ConnectionTest,
-  DatabaseStats
+  DatabaseStats,
+  ColumnInfo,
+  IndexInfo,
+  ConstraintInfo,
+  TableStatistics
 } from './types.js';
 
 export class DBeaverClient {
@@ -17,25 +21,37 @@ export class DBeaverClient {
     this.debug = debug;
   }
 
-  async executeQuery(connection: DBeaverConnection, query: string, password?: string): Promise<QueryResult> {
+  async executeQuery(connection: DBeaverConnection, query: string, password?: string, username?: string): Promise<QueryResult> {
     try {
-      const args = this.buildPsqlArgs(connection, query);
+      const args = this.buildPsqlArgs(connection, query, username);
       return await this.executePsql(args, password);
     } catch (error) {
       throw new Error(`Failed to execute query: ${error}`);
     }
   }
 
-  async executeWriteQuery(connection: DBeaverConnection, query: string, password?: string): Promise<QueryResult> {
+  async executeWriteQuery(connection: DBeaverConnection, query: string, password?: string, username?: string): Promise<QueryResult> {
     try {
-      const args = this.buildPsqlArgs(connection, query);
+      const args = this.buildPsqlArgs(connection, query, username);
       return await this.executePsqlWrite(args, password);
     } catch (error) {
       throw new Error(`Failed to execute write query: ${error}`);
     }
   }
 
-  private buildPsqlArgs(connection: DBeaverConnection, query: string): string[] {
+  private buildPsqlArgs(connection: DBeaverConnection, query: string, username?: string): string[] {
+    if (this.debug) {
+      console.error(`[DEBUG] Building psql args for connection:`, {
+        id: connection.id,
+        name: connection.name,
+        host: connection.host,
+        port: connection.port,
+        user: connection.user,
+        database: connection.database,
+        driver: connection.driver
+      });
+    }
+
     const args: string[] = [];
 
     // Add host if specified
@@ -48,9 +64,17 @@ export class DBeaverClient {
       args.push('-p', connection.port.toString());
     }
 
-    // Add username if specified
-    if (connection.user) {
-      args.push('-U', connection.user);
+    // Add username - use provided username, connection.user, or fallback to environment variable
+    let finalUsername = username || connection.user;
+    if (!finalUsername) {
+      // Try to get username from environment variables using the {db_name}_DB_USER pattern
+      const dbName = connection.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      const usernameVarName = `${dbName}_DB_USER`;
+      finalUsername = process.env[usernameVarName] || 'postgres'; // Default to postgres
+    }
+    
+    if (finalUsername) {
+      args.push('-U', finalUsername);
     }
 
     // Add database if specified
@@ -60,13 +84,32 @@ export class DBeaverClient {
 
     // Add query
     args.push('-c', query);
+    
+    // CRITICAL: Force psql to exit after command completion
+    args.push('--no-psqlrc'); // Don't read ~/.psqlrc (prevents interactive mode)
+    args.push('--no-align'); // Disable aligned output for easier parsing
+    args.push('--tuples-only'); // Output tuples only, no headers/footers
+    args.push('--field-separator=|'); // Use | as field separator
+
+    if (this.debug) {
+      console.error(`[DEBUG] Final psql args: ${JSON.stringify(args)}`);
+    }
 
     return args;
   }
 
   private async executePsql(args: string[], password?: string): Promise<QueryResult> {
+    if (this.debug) {
+      console.error(`[DEBUG] Executing psql with args: ${JSON.stringify(args)}`);
+      console.error(`[DEBUG] Password provided: ${password ? 'YES' : 'NO'}`);
+    }
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        if (this.debug) {
+          console.error(`[DEBUG] Query timeout reached (${this.timeout}ms), killing psql process ${proc.pid}`);
+        }
+        proc.kill('SIGKILL');
         reject(new Error('Query execution timed out'));
       }, this.timeout);
 
@@ -74,9 +117,23 @@ export class DBeaverClient {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
-          PGPASSWORD: password || process.env.PGPASSWORD || ''
-        }
+          PGPASSWORD: password || process.env.PGPASSWORD || '',
+          // Force psql to exit after command completion
+          PGCONNECT_TIMEOUT: '10', // 10 second connection timeout
+          PGOPTIONS: '-c statement_timeout=30000' // 30 second statement timeout
+        },
+        // Add additional safety options
+        detached: false, // Don't detach from parent process
+        windowsHide: true // Hide console window on Windows
       });
+
+      // Add additional safety timeout for connection establishment
+      const connectionTimeout = setTimeout(() => {
+        if (proc && !proc.connected) {
+          console.error(`[DEBUG] Connection timeout reached, killing psql process ${proc.pid}`);
+          proc.kill('SIGKILL');
+        }
+      }, 15000); // 15 second connection timeout
 
       let stdout = '';
       let stderr = '';
@@ -91,6 +148,7 @@ export class DBeaverClient {
 
       proc.on('close', (code) => {
         clearTimeout(timeout);
+        clearTimeout(connectionTimeout); // Clear the connection timeout
 
         if (code !== 0) {
           reject(new Error(`psql failed with code ${code}: ${stderr}`));
@@ -107,6 +165,7 @@ export class DBeaverClient {
 
       proc.on('error', (error) => {
         clearTimeout(timeout);
+        clearTimeout(connectionTimeout); // Clear the connection timeout
         reject(new Error(`Failed to execute psql: ${error.message}`));
       });
     });
@@ -115,6 +174,10 @@ export class DBeaverClient {
   private async executePsqlWrite(args: string[], password?: string): Promise<QueryResult> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        if (this.debug) {
+          console.error(`[DEBUG] Write query timeout reached (${this.timeout}ms), killing psql process ${proc.pid}`);
+        }
+        proc.kill('SIGKILL');
         reject(new Error('Write query execution timed out'));
       }, this.timeout);
 
@@ -122,9 +185,23 @@ export class DBeaverClient {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
-          PGPASSWORD: password || process.env.PGPASSWORD || ''
-        }
+          PGPASSWORD: password || process.env.PGPASSWORD || '',
+          // Force psql to exit after command completion
+          PGCONNECT_TIMEOUT: '10', // 10 second connection timeout
+          PGOPTIONS: '-c statement_timeout=30000' // 30 second statement timeout
+        },
+        // Add additional safety options
+        detached: false, // Don't detach from parent process
+        windowsHide: true // Hide console window on Windows
       });
+
+      // Add additional safety timeout for connection establishment
+      const connectionTimeout = setTimeout(() => {
+        if (proc && !proc.connected) {
+          console.error(`[DEBUG] Connection timeout reached, killing psql process ${proc.pid}`);
+          proc.kill('SIGKILL');
+        }
+      }, 15000); // 15 second connection timeout
 
       let stdout = '';
       let stderr = '';
@@ -139,6 +216,7 @@ export class DBeaverClient {
 
       proc.on('close', (code) => {
         clearTimeout(timeout);
+        clearTimeout(connectionTimeout); // Clear the connection timeout
 
         if (code !== 0) {
           reject(new Error(`psql failed with code ${code}: ${stderr}`));
@@ -155,6 +233,7 @@ export class DBeaverClient {
 
       proc.on('error', (error) => {
         clearTimeout(timeout);
+        clearTimeout(connectionTimeout); // Clear the connection timeout
         reject(new Error(`Failed to execute psql: ${error.message}`));
       });
     });
@@ -220,12 +299,13 @@ export class DBeaverClient {
     };
   }
 
-  async testConnection(connection: DBeaverConnection, password?: string): Promise<ConnectionTest> {
+  async testConnection(connection: DBeaverConnection, password?: string, username?: string): Promise<ConnectionTest> {
     const startTime = Date.now();
     
     try {
-      // Test connection by executing a simple query
-      const result = await this.executeQuery(connection, 'SELECT version();', password);
+      // Use a simple query to test the connection
+      const testQuery = 'SELECT 1 as test, version() as version';
+      const result = await this.executeQuery(connection, testQuery, password);
       
       const responseTime = Date.now() - startTime;
       const databaseVersion = this.extractVersionFromResult(result);
@@ -238,7 +318,6 @@ export class DBeaverClient {
       };
     } catch (error) {
       const responseTime = Date.now() - startTime;
-      
       return {
         connectionId: connection.id,
         success: false,
@@ -248,136 +327,121 @@ export class DBeaverClient {
     }
   }
 
-  async getTableSchema(connection: DBeaverConnection, tableName: string, password?: string): Promise<SchemaInfo> {
+  async getTableSchema(connection: DBeaverConnection, tableName: string, password?: string, username?: string): Promise<SchemaInfo> {
     try {
-      // Query to get table schema information with properly qualified column names
-      const schemaQuery = `
+      // Get table columns
+      const columnsQuery = `
         SELECT
-          col.column_name,
-          col.data_type,
-          col.is_nullable,
-          col.column_default,
+          c.column_name as name,
+          c.data_type as type,
+          c.is_nullable = 'YES' as nullable,
+          c.column_default as default_value,
           CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary_key,
-          CASE WHEN col.column_default LIKE 'nextval%' THEN true ELSE false END as is_auto_increment,
-          col.character_maximum_length,
-          col.numeric_precision,
-          col.numeric_scale,
-          col.ordinal_position
-        FROM information_schema.columns col
+          CASE WHEN c.column_default LIKE 'nextval%' THEN true ELSE false END as is_auto_increment,
+          c.character_maximum_length as length,
+          c.numeric_precision as precision,
+          c.numeric_scale as scale
+        FROM information_schema.columns c
         LEFT JOIN (
           SELECT kcu.column_name
           FROM information_schema.table_constraints tc
           JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-          WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = '${tableName}'
-        ) pk ON col.column_name = pk.column_name
-        WHERE col.table_name = '${tableName}'
-        ORDER BY col.ordinal_position;
+          WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1
+        ) pk ON c.column_name = pk.column_name
+        WHERE c.table_name = $1
+        ORDER BY c.ordinal_position
       `;
 
-      const result = await this.executeQuery(connection, schemaQuery, password);
-
-      // Parse the schema result
-      const columns = result.rows.map((row: any[]) => ({
-        name: row[0],
-        type: row[1],
-        nullable: row[2] === 'YES',
-        defaultValue: row[3] || undefined,
-        isPrimaryKey: row[4] === true,
-        isAutoIncrement: row[5] === true,
-        length: row[6] ? parseInt(row[6]) : undefined,
-        precision: row[7] ? parseInt(row[7]) : undefined,
-        scale: row[8] ? parseInt(row[8]) : undefined,
-        position: parseInt(row[9]) || 0
-      }));
-
-      // Get index information with more details
-      const indexQuery = `
+      // Get table indexes
+      const indexesQuery = `
         SELECT
-          i.relname as index_name,
-          array_to_string(array_agg(a.attname), ', ') as column_names,
-          ix.indisunique as is_unique,
-          ix.indisprimary as is_primary,
-          am.amname as index_type,
-          pg_get_indexdef(ix.indexrelid) as index_definition
-        FROM pg_class t
-        JOIN pg_index ix ON t.oid = ix.indrelid
-        JOIN pg_class i ON ix.indexrelid = i.oid
-        JOIN pg_am am ON i.relam = am.oid
+          i.relname as name,
+          array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns,
+          ix.indisunique as unique,
+          am.amname as type
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-        WHERE t.relname = '${tableName}'
-        GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indexrelid
-        ORDER BY i.relname;
+        JOIN pg_am am ON am.oid = i.relam
+        WHERE t.relname = $1
+        GROUP BY i.relname, ix.indisunique, am.amname
+        ORDER BY i.relname
       `;
 
-      const indexResult = await this.executeQuery(connection, indexQuery);
-      const indexes = indexResult.rows.map((row: any[]) => ({
-        name: row[0],
-        columns: row[1].split(', ').filter((col: string) => col.length > 0),
-        unique: row[2] === true,
-        isPrimary: row[3] === true,
-        type: row[4] || 'btree',
-        definition: row[5]
-      }));
-
-      // Get constraint information with more details
-      const constraintQuery = `
+      // Get table constraints
+      const constraintsQuery = `
         SELECT
-          con.conname as constraint_name,
-          con.contype as constraint_type,
-          pg_get_constraintdef(con.oid) as definition,
-          CASE
-            WHEN con.contype = 'f' THEN (
-              SELECT relname FROM pg_class WHERE oid = con.confrelid
-            )
-            ELSE NULL
-          END as referenced_table,
-          CASE
-            WHEN con.contype = 'f' THEN (
-              SELECT array_to_string(array_agg(att.attname), ', ')
-              FROM pg_attribute att
-              WHERE att.attrelid = con.confrelid AND att.attnum = ANY(con.confkey)
-            )
-            ELSE NULL
-          END as referenced_columns
-        FROM pg_constraint con
-        WHERE con.conrelid = '${tableName}'::regclass
-        ORDER BY con.conname;
+          tc.constraint_name as name,
+          tc.constraint_type as type,
+          array_agg(kcu.column_name ORDER BY kcu.ordinal_position) as columns,
+          ccu.table_name as referenced_table,
+          array_agg(ccu.column_name ORDER BY kcu.ordinal_position) as referenced_columns
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+        LEFT JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+        WHERE tc.table_name = $1
+        GROUP BY tc.constraint_name, tc.constraint_type, ccu.table_name
+        ORDER BY tc.constraint_name
       `;
-
-      const constraintResult = await this.executeQuery(connection, constraintQuery);
-      const constraints = constraintResult.rows.map((row: any[]) => ({
-        name: row[0],
-        type: this.mapConstraintType(row[1]),
-        definition: row[2],
-        columns: this.extractConstraintColumns(row[2]),
-        referencedTable: row[3] || undefined,
-        referencedColumns: row[4] ? row[4].split(', ') : undefined
-      }));
 
       // Get table statistics
       const statsQuery = `
         SELECT
-          pg_size_pretty(pg_total_relation_size('${tableName}'::regclass)) as total_size,
-          pg_size_pretty(pg_relation_size('${tableName}'::regclass)) as table_size,
-          pg_size_pretty(pg_total_relation_size('${tableName}'::regclass) - pg_relation_size('${tableName}'::regclass)) as index_size,
-          (SELECT count(*) FROM "${tableName}") as row_count
+          pg_size_pretty(pg_total_relation_size(quote_ident($1))) as total_size,
+          pg_size_pretty(pg_relation_size(quote_ident($1))) as table_size,
+          pg_size_pretty(pg_total_relation_size(quote_ident($1)) - pg_relation_size(quote_ident($1))) as index_size,
+          (SELECT reltuples FROM pg_class WHERE relname = $1) as row_count
       `;
 
-      let tableStats: any = undefined;
-      try {
-        const statsResult = await this.executeQuery(connection, statsQuery);
-        if (statsResult.rows.length > 0) {
-          const stats = statsResult.rows[0];
-          tableStats = {
-            totalSize: stats[0],
-            tableSize: stats[1],
-            indexSize: stats[2],
-            rowCount: parseInt(stats[3]) || 0
-          };
-        }
-      } catch (error) {
-        // Stats query might fail for some tables, ignore
-        tableStats = undefined;
+      // Execute queries in parallel for better performance
+      const [columnsResult, indexesResult, constraintsResult, statsResult] = await Promise.all([
+        this.executeQuery(connection, columnsQuery.replace(/\$1/g, `'${tableName}'`), password),
+        this.executeQuery(connection, indexesQuery.replace(/\$1/g, `'${tableName}'`), password),
+        this.executeQuery(connection, constraintsQuery.replace(/\$1/g, `'${tableName}'`), password),
+        this.executeQuery(connection, statsQuery.replace(/\$1/g, `'${tableName}'`), password)
+      ]);
+
+      // Parse columns
+      const columns: ColumnInfo[] = columnsResult.rows.map(row => ({
+        name: row[0],
+        type: row[1],
+        nullable: row[2] === 'true',
+        defaultValue: row[3] || undefined,
+        isPrimaryKey: row[4] === 'true',
+        isAutoIncrement: row[5] === 'true',
+        length: row[6] ? parseInt(row[6]) : undefined,
+        precision: row[7] ? parseInt(row[7]) : undefined,
+        scale: row[8] ? parseInt(row[8]) : undefined
+      }));
+
+      // Parse indexes
+      const indexes: IndexInfo[] = indexesResult.rows.map(row => ({
+        name: row[0],
+        columns: row[1] ? row[1].split(',') : [],
+        unique: row[2] === 'true',
+        type: row[3] || 'btree'
+      }));
+
+      // Parse constraints
+      const constraints: ConstraintInfo[] = constraintsResult.rows.map(row => ({
+        name: row[0],
+        type: this.mapConstraintType(row[1]),
+        columns: row[2] ? row[2].split(',') : [],
+        referencedTable: row[3] || undefined,
+        referencedColumns: row[4] ? row[4].split(',') : undefined
+      }));
+
+      // Parse statistics
+      let statistics: TableStatistics | undefined;
+      if (statsResult.rows.length > 0) {
+        const statsRow = statsResult.rows[0];
+        statistics = {
+          totalSize: statsRow[0] || '0',
+          tableSize: statsRow[1] || '0',
+          indexSize: statsRow[2] || '0',
+          rowCount: parseInt(statsRow[3]) || 0
+        };
       }
 
       return {
@@ -385,29 +449,11 @@ export class DBeaverClient {
         columns,
         indexes,
         constraints,
-        statistics: tableStats
+        statistics
       };
     } catch (error) {
       throw new Error(`Failed to get table schema: ${error}`);
     }
-  }
-
-  private extractIndexColumns(indexDef: string): string[] {
-    // Simple parsing of index definition to extract column names
-    const match = indexDef.match(/\(([^)]+)\)/);
-    if (match) {
-      return match[1].split(',').map(col => col.trim().replace(/"/g, ''));
-    }
-    return [];
-  }
-
-  private extractConstraintColumns(constraintDef: string): string[] {
-    // Simple parsing of constraint definition to extract column names
-    const match = constraintDef.match(/\(([^)]+)\)/);
-    if (match) {
-      return match[1].split(',').map(col => col.trim().replace(/"/g, ''));
-    }
-    return [];
   }
 
   private mapConstraintType(pgType: string): 'PRIMARY_KEY' | 'FOREIGN_KEY' | 'UNIQUE' | 'CHECK' {
@@ -478,7 +524,7 @@ export class DBeaverClient {
     return JSON.stringify(jsonData, null, 2);
   }
 
-  async getDatabaseStats(connection: DBeaverConnection): Promise<DatabaseStats> {
+  async getDatabaseStats(connection: DBeaverConnection, password?: string, username?: string): Promise<DatabaseStats> {
     try {
       // Get database statistics using PostgreSQL system queries
       const statsQuery = `
@@ -489,7 +535,7 @@ export class DBeaverClient {
           (SELECT extract(epoch from now() - pg_postmaster_start_time())::int) as uptime_seconds
       `;
 
-      const result = await this.executeQuery(connection, statsQuery);
+      const result = await this.executeQuery(connection, statsQuery, password);
 
       if (result.rows.length === 0) {
         throw new Error('Failed to retrieve database statistics');
@@ -532,7 +578,7 @@ export class DBeaverClient {
     return undefined;
   }
 
-  async listTables(connection: DBeaverConnection, schema?: string, includeViews: boolean = false, password?: string): Promise<any[]> {
+  async listTables(connection: DBeaverConnection, schema?: string, includeViews: boolean = false, password?: string, username?: string): Promise<any[]> {
     try {
       let query = `
         SELECT

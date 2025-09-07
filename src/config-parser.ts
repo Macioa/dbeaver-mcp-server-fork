@@ -102,6 +102,44 @@ export class DBeaverConfigParser {
     }
   }
 
+  private parseJdbcUrl(jdbcUrl: string): { host?: string; port?: number; database?: string; user?: string } {
+    if (!jdbcUrl || !jdbcUrl.startsWith('jdbc:')) {
+      return {};
+    }
+
+    try {
+      // Handle PostgreSQL JDBC URLs: jdbc:postgresql://host:port/database
+      if (jdbcUrl.includes('postgresql://')) {
+        const urlMatch = jdbcUrl.match(/jdbc:postgresql:\/\/([^\/]+)\/([^?]+)/);
+        if (urlMatch) {
+          const hostPort = urlMatch[1];
+          const database = urlMatch[2];
+          
+          const [host, portStr] = hostPort.split(':');
+          const port = portStr ? parseInt(portStr) : 5432;
+          
+          return { host, port, database };
+        }
+      }
+      
+      // Handle generic JDBC URLs with parameters
+      const url = new URL(jdbcUrl.replace('jdbc:', 'http://'));
+      const host = url.hostname;
+      const port = url.port ? parseInt(url.port) : undefined;
+      const database = url.pathname.replace('/', '');
+      
+      // Extract user from query parameters if present
+      const user = url.searchParams.get('user') || undefined;
+      
+      return { host, port, database, user };
+    } catch (error) {
+      if (this.config.debug) {
+        console.error(`Failed to parse JDBC URL: ${jdbcUrl}`, error);
+      }
+      return {};
+    }
+  }
+
   private async parseNewFormatConnections(filePath: string): Promise<DBeaverConnection[]> {
     const jsonContent = fs.readFileSync(filePath, 'utf-8');
     const data = JSON.parse(jsonContent);
@@ -138,11 +176,36 @@ export class DBeaverConfigParser {
           ...config
         };
 
+        // First try to get direct properties
         connection.url = config.url || '';
         connection.user = config.user || '';
         connection.host = config.host || config.server || '';
         connection.port = config.port ? parseInt(String(config.port)) : undefined;
         connection.database = config.database || '';
+
+        // If we have a JDBC URL, try to parse it for additional details
+        if (config.url && config.url.startsWith('jdbc:')) {
+          const jdbcInfo = this.parseJdbcUrl(config.url);
+          
+          // Use JDBC URL info to fill in missing connection details
+          if (!connection.host && jdbcInfo.host) {
+            connection.host = jdbcInfo.host;
+          }
+          if (!connection.port && jdbcInfo.port) {
+            connection.port = jdbcInfo.port;
+          }
+          if (!connection.database && jdbcInfo.database) {
+            connection.database = jdbcInfo.database;
+          }
+          if (!connection.user && jdbcInfo.user) {
+            connection.user = jdbcInfo.user;
+          }
+        }
+
+        // Set default PostgreSQL port if not specified
+        if (!connection.port && connection.driver?.includes('postgresql')) {
+          connection.port = 5432;
+        }
       }
 
       connections.push(connection);
@@ -197,6 +260,30 @@ export class DBeaverConfigParser {
         connection.host = properties.host || '';
         connection.port = properties.port ? parseInt(properties.port) : undefined;
         connection.database = properties.database || '';
+
+        // If we have a JDBC URL, try to parse it for additional details
+        if (properties.url && properties.url.startsWith('jdbc:')) {
+          const jdbcInfo = this.parseJdbcUrl(properties.url);
+          
+          // Use JDBC URL info to fill in missing connection details
+          if (!connection.host && jdbcInfo.host) {
+            connection.host = jdbcInfo.host;
+          }
+          if (!connection.port && jdbcInfo.port) {
+            connection.port = jdbcInfo.port;
+          }
+          if (!connection.database && jdbcInfo.database) {
+            connection.database = jdbcInfo.database;
+          }
+          if (!connection.user && jdbcInfo.user) {
+            connection.user = jdbcInfo.user;
+          }
+        }
+
+        // Set default PostgreSQL port if not specified
+        if (!connection.port && connection.driver?.includes('postgresql')) {
+          connection.port = 5432;
+        }
       }
 
       connections.push(connection);
@@ -302,6 +389,34 @@ export class DBeaverConfigParser {
       isNewFormat: this.isNewFormat,
       platform: os.platform(),
       nodeVersion: process.version
+    };
+  }
+
+  async getConnectionDebugInfo(connectionId: string): Promise<object> {
+    const connection = await this.getConnection(connectionId);
+    if (!connection) {
+      return { error: 'Connection not found' };
+    }
+
+    const jdbcInfo = connection.url ? this.parseJdbcUrl(connection.url) : {};
+    
+    return {
+      connectionId,
+      name: connection.name,
+      driver: connection.driver,
+      url: connection.url,
+      user: connection.user,
+      host: connection.host,
+      port: connection.port,
+      database: connection.database,
+      jdbcParsed: jdbcInfo,
+      properties: connection.properties,
+      hasRequiredFields: {
+        host: !!connection.host,
+        port: !!connection.port,
+        database: !!connection.database,
+        user: !!connection.user
+      }
     };
   }
 }
